@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Advanced Web Speed Test</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: 'Segoe UI', sans-serif;
+      background: linear-gradient(to right, #0f2027, #203a43, #2c5364);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    .container {
+      background: #1c1c1e;
+      padding: 2rem;
+      border-radius: 20px;
+      box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+      width: 100%;
+      max-width: 600px;
+    }
+    h1 {
+      text-align: center;
+      margin-bottom: 1rem;
+    }
+    button {
+      display: block;
+      margin: 1rem auto;
+      padding: 0.75rem 2rem;
+      font-size: 1rem;
+      border: none;
+      border-radius: 10px;
+      background: #007bff;
+      color: #fff;
+      cursor: pointer;
+      transition: background 0.3s;
+    }
+    button:hover:enabled {
+      background: #0056b3;
+    }
+    .result {
+      background: #2c2c2e;
+      padding: 0.75rem 1rem;
+      margin-top: 1rem;
+      border-radius: 10px;
+      font-size: 1rem;
+    }
+    .bar {
+      margin-top: 0.5rem;
+      width: 100%;
+      height: 16px;
+      background: #444;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .fill {
+      height: 100%;
+      width: 0;
+      border-radius: 10px;
+      transition: width 1s ease-in-out;
+    }
+    .fill.download { background: #ffc107; }
+    .fill.upload { background: #f44336; }
+    .fill.good { background: #4caf50; }
+    .summary {
+      text-align: center;
+      margin-top: 1.5rem;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Advanced Speed Test</h1>
+    <button id="startBtn">Start Test</button>
+    <div id="ip" class="result">Your IP: ...</div>
+    <div id="server" class="result">Server: ...</div>
+    <div id="location" class="result">Location: ...</div>
+    <div id="ping" class="result">Ping: ...</div>
+    <div id="jitter" class="result">Jitter: ...</div>
+
+    <div class="result">
+      Download: <span id="download">...</span>
+      <div class="bar"><div id="downloadBar" class="fill download"></div></div>
+    </div>
+
+    <div class="result">
+      Upload: <span id="upload">...</span>
+      <div class="bar"><div id="uploadBar" class="fill upload"></div></div>
+    </div>
+
+    <div id="status" class="result">Status: Ready</div>
+    <div id="summary" class="summary"></div>
+  </div>
+
+  <script>
+    const ipEl = document.getElementById('ip');
+    const serverEl = document.getElementById('server');
+    const locationEl = document.getElementById('location');
+    const latencyEl = document.getElementById('ping');
+    const jitterEl = document.getElementById('jitter');
+    const downloadEl = document.getElementById('download');
+    const uploadEl = document.getElementById('upload');
+    const downloadBar = document.getElementById('downloadBar');
+    const uploadBar = document.getElementById('uploadBar');
+    const statusEl = document.getElementById('status');
+    const summaryEl = document.getElementById('summary');
+    const startBtn = document.getElementById('startBtn');
+
+    async function getIPAndISP() {
+      try {
+        const res = await fetch('https://ipapi.co/json');
+        const data = await res.json();
+        ipEl.textContent = 'Your IP: ' + data.ip;
+        serverEl.textContent = 'Server: ' + data.org;
+        locationEl.textContent = 'Location: ' + data.city + ', ' + data.region + ', ' + data.country_name;
+      } catch {
+        ipEl.textContent = 'Your IP: Unknown';
+        serverEl.textContent = 'Server: Unknown';
+        locationEl.textContent = 'Location: Unknown';
+      }
+    }
+
+    async function measureLatencyAndJitter(samples = 6) {
+      let latencies = [];
+      for (let i = 0; i < samples; i++) {
+        const start = performance.now();
+        await fetch('https://1.1.1.1/cdn-cgi/trace', { cache: 'no-store' });
+        const end = performance.now();
+        latencies.push(end - start);
+      }
+      const avg = latencies.reduce((a, b) => a + b) / latencies.length;
+      const jitter = latencies.reduce((sum, val) => sum + Math.abs(val - avg), 0) / latencies.length;
+      return { latency: avg, jitter };
+    }
+
+    async function measureDownload(maxSeconds = 8, targetBytes = 60_000_000) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), maxSeconds * 1000);
+
+      let bytesReceived = 0;
+      const start = performance.now();
+
+      try {
+        const resp = await fetch(
+          'https://speed.cloudflare.com/__down?bytes=' + targetBytes,
+          { cache: 'no-store', signal: controller.signal }
+        );
+        const reader = resp.body.getReader();
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          bytesReceived += value.length;
+          if ((performance.now() - start) / 1000 >= maxSeconds) {
+            controller.abort();
+            break;
+          }
+        }
+      } catch (err) {
+        if (err.name !== 'AbortError') throw err;
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      const duration = (performance.now() - start) / 1000;
+      return (bytesReceived * 8) / (duration * 1e6); // Mbps
+    }
+
+    function measureUpload(maxSeconds = 8, targetBytes = 60_000_000) {
+      return new Promise((resolve, reject) => {
+        const data = new Uint8Array(targetBytes);
+        const xhr = new XMLHttpRequest();
+
+        let bytesSent = 0;
+        let startTime = 0;
+
+        const finish = () => {
+          const duration = (performance.now() - startTime) / 1000 || 1;
+          resolve((bytesSent * 8) / (duration * 1e6)); // Mbps
+        };
+
+        xhr.open('POST', 'https://httpbin.org/post');
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+
+        const killer = setTimeout(() => xhr.abort(), maxSeconds * 1000);
+
+        xhr.upload.onloadstart = () => { startTime = performance.now(); };
+        xhr.upload.onprogress = (e) => { bytesSent = e.loaded; };
+
+        xhr.onload = () => { clearTimeout(killer); finish(); };
+        xhr.onerror = () => { clearTimeout(killer); reject(new Error('Upload gagal')); };
+        xhr.onabort = () => { clearTimeout(killer); finish(); };
+
+        xhr.send(data);
+      });
+    }
+
+    function animateBar(bar, value, max = 100) {
+      const percent = Math.min(100, (value / max) * 100);
+      bar.style.width = percent + '%';
+      if (value > 30) bar.classList.add('good');
+    }
+
+    function getSummary(download, upload, ping) {
+      if (download > 40 && upload > 10 && ping < 40) return 'Koneksi kamu Bagus (Fast)';
+      if (download > 15 && upload > 3 && ping < 100) return 'Koneksi kamu Cukup (Average)';
+      return 'Koneksi kamu Buruk (Slow)';
+    }
+
+    async function runTest() {
+      startBtn.disabled = true;
+      statusEl.textContent = 'Testing…';
+      downloadBar.style.width = '0';
+      uploadBar.style.width = '0';
+      summaryEl.textContent = '';
+
+      try {
+        await getIPAndISP();
+        const { latency, jitter } = await measureLatencyAndJitter();
+        latencyEl.textContent = 'Ping: ' + Math.round(latency) + ' ms';
+        jitterEl.textContent = 'Jitter: ' + Math.round(jitter) + ' ms';
+
+        const download = await measureDownload();
+        downloadEl.textContent = download.toFixed(1) + ' Mbps';
+        animateBar(downloadBar, download);
+
+        const upload = await measureUpload();
+        uploadEl.textContent = upload.toFixed(1) + ' Mbps';
+        animateBar(uploadBar, upload);
+
+        statusEl.textContent = 'Test completed';
+        summaryEl.textContent = 'Kesimpulan: ' + getSummary(download, upload, latency);
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+      } finally {
+        startBtn.disabled = false;
+      }
+    }
+
+    startBtn.addEventListener('click', runTest);
+    window.addEventListener('load', getIPAndISP);
+  </script>
+</body>
+</html>
